@@ -91,12 +91,12 @@ const MIN_ANGLE = 10, MAX_ANGLE = 170;
 
 // Snake
 const PATH_DIST = 0.05;     // world units between path records
-const SEG_SPACING = 5;      // path indices between segments
+const SEG_SPACING = 7;      // path indices between segments
 const BIG_COUNT = 20;        // number of body groups
 const SUBS_PER = 5;         // sub-segments per group
-const BODY_R = 0.12;        // body segment radius
+const BODY_R = 0.20;        // body segment radius
 const HEAD_R = BODY_R*1.6;  // head radius
-const REWARD_R = BODY_R*1.1; // reward radius
+const REWARD_R = BODY_R*1.2; // reward radius
 const DROP_DIST = 0.8;      // zigzag drop distance
 
 // ══════════ STARS (background decorations) ══════════
@@ -654,7 +654,7 @@ function drawSnake(s) {
       ctx.closePath(); ctx.stroke();
 
       if (seg.hp > 0) {
-        drawHudText(seg.hp.toString(), toX(x), toY(y), 8, '#7a4a10', 'center');
+        drawHudText(seg.hp.toString(), toX(x), toY(y), 13, '#7a4a10', 'center');
       }
     }
     else if (seg.type === 'sub') {
@@ -692,7 +692,7 @@ function drawSnake(s) {
     if (midSeg) {
       const hpR = Math.max(0, g.hp) / g.maxHp;
       const tcol = lerpC([255,68,68], [255,255,255], hpR);
-      drawHudText(g.hp.toString(), toX(midSeg.vx), toY(midSeg.vy), 8, rgb(tcol), 'center');
+      drawHudText(g.hp.toString(), toX(midSeg.vx), toY(midSeg.vy), 13, rgb(tcol), 'center');
     }
   }
 }
