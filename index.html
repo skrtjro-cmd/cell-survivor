@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Cell Survivor</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d0d1f;display:flex;justify-content:center;align-items:center;height:100vh;overflow:hidden}
+canvas{touch-action:none}
+</style>
+</head>
+<body>
+<canvas id="g"></canvas>
+<script>
+"use strict";
+/* ═══════════════════════════════════════════════════════
+   CELL SURVIVOR — HTML5 Canvas Edition
+   Accurate port matching Unity visual style
+   ═══════════════════════════════════════════════════════ */
+
+// ══════════ WORLD SPACE (Unity camera ortho=5.5) ══════════
+const ORTHO = 5.5;
+const ASPECT = 9 / 16;
+const WORLD_H = ORTHO * 2;             // 11 units
+const WORLD_W = WORLD_H * ASPECT;      // ~6.19 units
+const HALF_W = WORLD_W / 2;            // ~3.09
+const HALF_H = ORTHO;                  // 5.5
+
+// ══════════ CANVAS ══════════
+const CW = 400, CH = Math.round(CW / ASPECT); // 400×711
+const PPU = CH / WORLD_H;              // ~64.6 px/unit
+const canvas = document.getElementById('g');
+const ctx = canvas.getContext('2d');
+let displayScale = 1;
+
+function toX(wx) { return (wx + HALF_W) * PPU; }
+function toY(wy) { return (HALF_H - wy) * PPU; }
+function toS(ws) { return Math.abs(ws) * PPU; }
+
+function resize() {
+  displayScale = Math.min(innerWidth / CW, innerHeight / CH);
+  canvas.width = CW * displayScale;
+  canvas.height = CH * displayScale;
+  canvas.style.width = canvas.width + 'px';
+  canvas.style.height = canvas.height + 'px';
+  ctx.setTransform(displayScale, 0, 0, displayScale, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+// ══════════ INPUT ══════════
+let inputX = CW / 2, inputY = 0;
+function handleInput(e) {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  inputX = (t.clientX - r.left) / displayScale;
+  inputY = (t.clientY - r.top) / displayScale;
+}
+canvas.onmousemove = handleInput;
+canvas.onmousedown = handleInput;
+canvas.ontouchstart = e => { e.preventDefault(); handleInput(e); };
+canvas.ontouchmove = e => { e.preventDefault(); handleInput(e); };
+canvas.ontouchend = e => e.preventDefault();
+
+// ══════════ COLOR UTILS ══════════
+const BG_COLOR = 'rgb(13,13,31)';
+const VIRUS_COLORS = [
+  [128,255,140], [255,128,140], [179,140,255], [255,217,102], [102,217,255]
+];
+const rgb = c => `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+const rgba = (c,a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const lerpN = (a,b,t) => a+(b-a)*t;
+const lerpC = (a,b,t) => [lerpN(a[0],b[0],t), lerpN(a[1],b[1],t), lerpN(a[2],b[2],t)];
+
+// ══════════ GAME STATE ══════════
+let gameState = 'menu'; // menu, countdown, playing, gameover
+let wave = 1, score = 0, playerHP = 10, maxHP = 10;
+let aimAngle = 90; // degrees (90=up, 10-170 range)
+let fireTimer = 0, playerInvTimer = 0;
+let hasFrost = false, hasPierce = false, hasSplit = false;
+let bullets = [], particles = [];
+let snake = null;
+let countdownTimer = 0, countdownText = '';
+
+// ══════════ CONSTANTS ══════════
+const PLAYER_X = 0, PLAYER_Y = -4.2, PLAYER_R = 0.25;
+const FIRE_INTERVAL = 0.5, BULLET_SPEED = 12, BULLET_R = 0.06;
+const AIM_LENGTH = 8, AIM_SEGMENTS = 20;
+const MIN_ANGLE = 10, MAX_ANGLE = 170;
+
+// Snake
+const PATH_DIST = 0.05;     // world units between path records
+const SEG_SPACING = 5;      // path indices between segments
+const BIG_COUNT = 20;        // number of body groups
+const SUBS_PER = 5;         // sub-segments per group
+const BODY_R = 0.12;        // body segment radius
+const HEAD_R = BODY_R*1.6;  // head radius
+const REWARD_R = BODY_R*1.1; // reward radius
+const DROP_DIST = 0.8;      // zigzag drop distance
+
+// ══════════ STARS (background decorations) ══════════
+const stars = [];
+for (let i = 0; i < 30; i++) {
+  stars.push({
+    x: (Math.random()-0.5) * WORLD_W * 0.95,
+    y: (Math.random()-0.5) * WORLD_H * 0.95,
+    brightness: 0.3 + Math.random() * 0.5,
+    size: 0.04 + Math.random() * 0.06
+  });
+}
+
+// ══════════ PARTICLES ══════════
+function spawnParticles(worldX, worldY, color, count) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const spd = 0.5 + Math.random() * 1.5;
+    particles.push({
+      x: worldX, y: worldY,
+      vx: Math.cos(a)*spd, vy: Math.sin(a)*spd,
+      life: 0.3 + Math.random()*0.3, maxLife: 0.6,
+      r: 0.02 + Math.random()*0.03, color
+    });
+  }
+}
+
+// ══════════ BULLET ══════════
+function fireBullet() {
+  const rad = aimAngle * Math.PI / 180;
+  const dx = Math.cos(rad), dy = Math.sin(rad);
+  const ox = PLAYER_X, oy = PLAYER_Y + 0.3;
+  bullets.push({ x:ox, y:oy, dx, dy, speed:BULLET_SPEED, dmg:1, r:BULLET_R,
+    pierce:hasPierce, frost:hasFrost, alive:true });
+  if (hasSplit) {
+    for (const off of [-0.15, 0.15]) {
+      bullets.push({ x:ox, y:oy, dx:Math.cos(rad+off), dy:Math.sin(rad+off),
+        speed:BULLET_SPEED, dmg:1, r:BULLET_R, pierce:false, frost:hasFrost, alive:true });
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════
+// SNAKE CREATION
+// ══════════════════════════════════════════════════
+function createSnake(w) {
+  const colIdx = Math.floor(Math.random() * VIRUS_COLORS.length);
+  const col = VIRUS_COLORS[colIdx];
+  const baseHP = 10 + (w - 1) * 3;
+  const speed = Math.min(2.5, 0.8 + w * 0.12);
+  const spawnX = -HALF_W + 0.2;
+  const spawnY = 4.0;
+
+  const s = {
+    col, speed,
+    moveDir: 1, dropping: false, dropTarget: 0,
+    leftB: -HALF_W + 0.1, rightB: HALF_W - 0.1,
+    path: [], segments: [], groups: [],
+    closingGaps: new Map(),
+    retreating: false, retreatIdx: 0, retreatTarget: 0, retreatFrac: 0,
+    defeated: false,
+    headRealX: spawnX, headRealY: spawnY
+  };
+
+  // Head
+  s.segments.push({
+    type:'head', alive:true, r:HEAD_R, group:null,
+    hp:9999, maxHp:9999, slowTimer:0, vx:spawnX, vy:spawnY
+  });
+
+  for (let g = 0; g < BIG_COUNT; g++) {
+    const tailR = g / Math.max(1, BIG_COUNT - 1);
+    const ghp = baseHP + Math.round(tailR * baseHP * 2);
+    const group = { hp:ghp, maxHp:ghp, destroyed:false };
+    s.groups.push(group);
+
+    for (let sub = 0; sub < SUBS_PER; sub++) {
+      const sc = 1.0 - sub * 0.03;
+      s.segments.push({
+        type:'sub', alive:true, r:BODY_R*sc, group,
+        hp:1, maxHp:1, slowTimer:0, vx:spawnX, vy:spawnY
+      });
+    }
+    // Reward between groups (not after last)
+    if (g < BIG_COUNT - 1) {
+      const rhp = 10 + Math.round(tailR * 20);
+      s.segments.push({
+        type:'reward', alive:true, r:REWARD_R, group:null,
+        hp:rhp, maxHp:rhp, slowTimer:0, vx:spawnX, vy:spawnY
+      });
+    }
+  }
+
+  // Initialize path (horizontal line extending left from spawn)
+  const pathLen = (s.segments.length + 10) * SEG_SPACING;
+  for (let i = 0; i < pathLen; i++)
+    s.path.push({ x: spawnX - i * PATH_DIST, y: spawnY });
+
+  return s;
+}
+
+// ══════════════════════════════════════════════════
+// SNAKE LOGIC
+// ══════════════════════════════════════════════════
+function snakeAlive(s) {
+  for (const g of s.groups) if (!g.destroyed) return true;
+  for (const seg of s.segments) if (seg.alive && seg.type === 'reward') return true;
+  return false;
+}
+
+function calcTotalPush(s) {
+  let tp = 0;
+  for (const [,v] of s.closingGaps) tp += SEG_SPACING - v;
+  return tp;
+}
+
+function getFirstAliveIdx(s) {
+  let tp = calcTotalPush(s), pi = SEG_SPACING, pr = tp;
+  for (let i = 1; i < s.segments.length; i++) {
+    const seg = s.segments[i];
+    if (seg.alive) return pi + Math.round(pr);
+    if (s.closingGaps.has(i)) {
+      pi += SEG_SPACING;
+      pr -= (SEG_SPACING - s.closingGaps.get(i));
+    } else pi += SEG_SPACING;
+  }
+  return pi + Math.round(pr);
+}
+
+function beginRetreat(s) {
+  const fa = getFirstAliveIdx(s);
+  const tgt = Math.min(Math.max(0, fa - SEG_SPACING), s.path.length - 1);
+  if (tgt > (s.retreating ? s.retreatIdx : 0)) {
+    if (!s.retreating) { s.retreatIdx = 0; s.retreatFrac = 0; }
+    s.retreatTarget = tgt;
+    s.retreating = true;
+  }
+}
+
+function startGapClosure(s) {
+  for (let i = 1; i < s.segments.length; i++) {
+    if (!s.segments[i].alive && !s.closingGaps.has(i))
+      s.closingGaps.set(i, SEG_SPACING);
+  }
+}
+
+function removeLeadingDead(s) {
+  let i = 1;
+  while (i < s.segments.length) {
+    if (!s.segments[i].alive) {
+      s.closingGaps.delete(i);
+      s.segments.splice(i, 1);
+      const nm = new Map();
+      for (const [k,v] of s.closingGaps) nm.set(k > i ? k-1 : k, v);
+      s.closingGaps = nm;
+    } else break;
+  }
+}
+
+function onGroupDestroyed(s, group) {
+  for (let i = 0; i < s.segments.length; i++) {
+    if (s.segments[i].group === group && s.segments[i].alive) {
+      s.segments[i].alive = false;
+      spawnParticles(s.segments[i].vx, s.segments[i].vy, s.col, 3);
+    }
+  }
+  group.destroyed = true;
+  score += SUBS_PER * 10;
+  beginRetreat(s);
+  if (!s.retreating) startGapClosure(s);
+  if (!s.defeated && !snakeAlive(s)) {
+    s.defeated = true;
+    setTimeout(() => { if (gameState === 'playing') nextWave(); }, 1000);
+  }
+}
+
+function onRewardKilled(s, idx) {
+  s.segments[idx].alive = false;
+  spawnParticles(s.segments[idx].vx, s.segments[idx].vy, [255,230,51], 8);
+  score += 50;
+  beginRetreat(s);
+  if (!s.retreating) startGapClosure(s);
+  if (!s.defeated && !snakeAlive(s)) {
+    s.defeated = true;
+    setTimeout(() => { if (gameState === 'playing') nextWave(); }, 1000);
+  }
+}
+
+function syncZigzag(s) {
+  if (s.path.length < 6) return;
+  const n = Math.min(5, s.path.length - 1);
+  const dx = s.path[0].x - s.path[n].x;
+  const dy = s.path[0].y - s.path[n].y;
+  if (Math.abs(dy) > Math.abs(dx) && dy < 0) {
+    s.dropping = true;
+    s.dropTarget = s.headRealY - DROP_DIST;
+  } else {
+    s.dropping = false;
+    s.moveDir = dx >= 0 ? 1 : -1;
+  }
+}
+
+// ══════════════════════════════════════════════════
+// SNAKE UPDATE
+// ══════════════════════════════════════════════════
+function updateSnake(s, dt) {
+  if (s.defeated) return;
+  // Slow timers
+  for (const seg of s.segments)
+    if (seg.slowTimer > 0) seg.slowTimer -= dt;
+
+  moveSnakeHead(s, dt);
+  if (!s.retreating) recordPath(s);
+  if (!s.retreating) updateGapClosure(s, dt);
+  positionSegments(s);
+
+  // Bottom bound check
+  if (s.headRealY < -5.5 && !s.defeated) {
+    s.defeated = true;
+    setTimeout(() => { if (gameState === 'playing') nextWave(); }, 500);
+  }
+}
+
+function moveSnakeHead(s, dt) {
+  const slow = s.segments[0].slowTimer > 0 ? 0.4 : 1;
+  const spd = s.speed * slow * dt;
+
+  if (s.retreating) {
+    s.retreatFrac += spd * 5 / PATH_DIST;
+    const steps = Math.floor(s.retreatFrac);
+    if (steps > 0) {
+      s.retreatFrac -= steps;
+      s.retreatIdx = Math.min(s.retreatIdx + steps, s.retreatTarget);
+    }
+    if (s.retreatIdx >= s.retreatTarget) {
+      const si = Math.min(s.retreatTarget, s.path.length - 1);
+      s.headRealX = s.path[si].x;
+      s.headRealY = s.path[si].y;
+      if (s.retreatTarget > 0 && s.retreatTarget < s.path.length)
+        s.path.splice(0, s.retreatTarget);
+      s.retreating = false;
+      s.retreatIdx = 0; s.retreatTarget = 0; s.retreatFrac = 0;
+      removeLeadingDead(s);
+      syncZigzag(s);
+      startGapClosure(s);
+    } else {
+      const ci = Math.min(s.retreatIdx, s.path.length - 1);
+      s.segments[0].vx = s.path[ci].x;
+      s.segments[0].vy = s.path[ci].y;
+    }
+    return;
+  }
+
+  let x = s.headRealX, y = s.headRealY;
+  if (s.dropping) {
+    y -= spd;
+    if (y <= s.dropTarget) { y = s.dropTarget; s.dropping = false; s.moveDir *= -1; }
+  } else {
+    x += s.moveDir * spd;
+    if (x >= s.rightB) { x = s.rightB; s.dropping = true; s.dropTarget = y - DROP_DIST; }
+    else if (x <= s.leftB) { x = s.leftB; s.dropping = true; s.dropTarget = y - DROP_DIST; }
+  }
+  s.headRealX = x; s.headRealY = y;
+}
+
+function recordPath(s) {
+  if (s.path.length === 0 ||
+      Math.hypot(s.headRealX - s.path[0].x, s.headRealY - s.path[0].y) >= PATH_DIST) {
+    s.path.unshift({ x: s.headRealX, y: s.headRealY });
+    const max = (s.segments.length + 10) * SEG_SPACING;
+    if (s.path.length > max) s.path.length = max;
+  }
+}
+
+function updateGapClosure(s, dt) {
+  if (s.closingGaps.size === 0) return;
+  const rate = s.speed * dt / PATH_DIST;
+  for (const [k,v] of s.closingGaps) {
+    s.closingGaps.set(k, Math.max(0, v - rate));
+  }
+}
+
+function positionSegments(s) {
+  const tp = calcTotalPush(s);
+  // Head visual position with push
+  if (!s.retreating) {
+    const hi = Math.round(tp);
+    if (hi > 0 && hi < s.path.length) {
+      s.segments[0].vx = s.path[hi].x;
+      s.segments[0].vy = s.path[hi].y;
+    } else {
+      s.segments[0].vx = s.headRealX;
+      s.segments[0].vy = s.headRealY;
+    }
+  }
+  let pi = SEG_SPACING, pr = tp;
+  for (let i = 1; i < s.segments.length; i++) {
+    const seg = s.segments[i];
+    if (!seg.alive) {
+      if (s.closingGaps.has(i)) {
+        pi += SEG_SPACING;
+        pr -= (SEG_SPACING - s.closingGaps.get(i));
+      } else pi += SEG_SPACING;
+      continue;
+    }
+    const ei = Math.min(pi + Math.round(pr), s.path.length - 1);
+    if (ei >= 0 && ei < s.path.length) {
+      seg.vx = s.path[ei].x;
+      seg.vy = s.path[ei].y;
+    }
+    pi += SEG_SPACING;
+  }
+}
+
+// ══════════════════════════════════════════════════
+// COLLISIONS
+// ══════════════════════════════════════════════════
+function checkCollisions() {
+  if (!snake || snake.defeated) return;
+  const s = snake;
+
+  // Bullets vs snake
+  for (const b of bullets) {
+    if (!b.alive) continue;
+    for (let i = 0; i < s.segments.length; i++) {
+      const seg = s.segments[i];
+      if (!seg.alive) continue;
+      const dist = Math.hypot(b.x - seg.vx, b.y - seg.vy);
+      if (dist > seg.r + b.r) continue;
+      if (seg.type === 'head') continue; // indestructible
+
+      if (seg.type === 'sub' && seg.group && !seg.group.destroyed) {
+        seg.group.hp -= b.dmg;
+        if (b.frost) {
+          // Freeze entire group
+          for (let j = 0; j < s.segments.length; j++)
+            if (s.segments[j].group === seg.group && s.segments[j].alive)
+              s.segments[j].slowTimer = 2;
+          s.segments[0].slowTimer = 2;
+        }
+        spawnParticles(b.x, b.y, s.col, 2);
+        if (seg.group.hp <= 0) { seg.group.hp = 0; onGroupDestroyed(s, seg.group); }
+        if (!b.pierce) b.alive = false;
+        break;
+      }
+      if (seg.type === 'reward') {
+        seg.hp -= b.dmg;
+        if (b.frost) { seg.slowTimer = 2; s.segments[0].slowTimer = 2; }
+        spawnParticles(b.x, b.y, [255,230,51], 2);
+        if (seg.hp <= 0) onRewardKilled(s, i);
+        if (!b.pierce) b.alive = false;
+        break;
+      }
+    }
+  }
+
+  // Snake body vs player
+  if (playerInvTimer > 0) return;
+  for (let i = 1; i < s.segments.length; i++) {
+    const seg = s.segments[i];
+    if (!seg.alive) continue;
+    const dist = Math.hypot(PLAYER_X - seg.vx, PLAYER_Y - seg.vy);
+    if (dist < PLAYER_R + seg.r) {
+      playerHP--;
+      playerInvTimer = 1.5;
+      spawnParticles(PLAYER_X, PLAYER_Y, [255,68,68], 8);
+      // Destroy the segment that hit player
+      if (seg.type === 'sub' && seg.group && !seg.group.destroyed) {
+        seg.group.hp -= seg.group.maxHp;
+        if (seg.group.hp <= 0) { seg.group.hp = 0; onGroupDestroyed(s, seg.group); }
+      } else if (seg.type === 'reward') {
+        onRewardKilled(s, i);
+      }
+      if (playerHP <= 0) gameState = 'gameover';
+      break;
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════
+// WAVE MANAGEMENT
+// ══════════════════════════════════════════════════
+function nextWave() {
+  wave++;
+  snake = createSnake(wave);
+  // Auto-upgrade skills
+  if (wave === 3) hasFrost = true;
+  if (wave === 5) hasSplit = true;
+  if (wave === 7) hasPierce = true;
+  if (wave % 5 === 0) playerHP = Math.min(playerHP + 2, maxHP);
+}
+
+function startGame() {
+  gameState = 'countdown';
+  wave = 1; score = 0; playerHP = maxHP;
+  hasFrost = false; hasPierce = false; hasSplit = false;
+  bullets = []; particles = [];
+  countdownTimer = 2.4; countdownText = '3';
+  snake = null;
+}
+
+// ══════════════════════════════════════════════════
+// DRAWING
+// ══════════════════════════════════════════════════
+function drawCircle(worldX, worldY, worldR, fill, stroke, lw) {
+  const cx = toX(worldX), cy = toY(worldY), cr = toS(worldR);
+  ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI*2);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw||1; ctx.stroke(); }
+}
+
+function drawDiamond(worldX, worldY, worldR, fill) {
+  const cx = toX(worldX), cy = toY(worldY), cr = toS(worldR);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy-cr); ctx.lineTo(cx+cr, cy);
+  ctx.lineTo(cx, cy+cr); ctx.lineTo(cx-cr, cy);
+  ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+}
+
+function drawText(text, worldX, worldY, sizePx, color, align) {
+  ctx.font = `bold ${sizePx}px 'Segoe UI',Arial,sans-serif`;
+  ctx.textAlign = align || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.fillText(text, toX(worldX), toY(worldY));
+}
+
+// Canvas-space text (for HUD)
+function drawHudText(text, cx, cy, sizePx, color, align) {
+  ctx.font = `bold ${sizePx}px 'Segoe UI',Arial,sans-serif`;
+  ctx.textAlign = align || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.fillText(text, cx, cy);
+}
+
+// ── Draw Background ──
+function drawBackground() {
+  ctx.fillStyle = BG_COLOR;
+  ctx.fillRect(0, 0, CW, CH);
+
+  // Stars
+  for (const s of stars) {
+    const b = s.brightness;
+    ctx.fillStyle = `rgba(${b*255|0},${b*255|0},${b*255|0},0.8)`;
+    const cx = toX(s.x), cy = toY(s.y), cr = toS(s.size);
+    ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+// ── Draw Player ──
+function drawPlayer() {
+  const flash = playerInvTimer > 0 && Math.floor(playerInvTimer * 10) % 2 === 0;
+  if (flash) return;
+
+  // Player body (cyan cell)
+  const px = toX(PLAYER_X), py = toY(PLAYER_Y), pr = toS(PLAYER_R);
+  // Outer glow
+  const grd = ctx.createRadialGradient(px, py, pr*0.5, px, py, pr*1.3);
+  grd.addColorStop(0, 'rgba(77,201,246,0.3)');
+  grd.addColorStop(1, 'rgba(77,201,246,0)');
+  ctx.fillStyle = grd;
+  ctx.beginPath(); ctx.arc(px, py, pr*1.3, 0, Math.PI*2); ctx.fill();
+
+  // Main body
+  ctx.fillStyle = '#4dc9f6';
+  ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI*2); ctx.fill();
+
+  // Inner highlight
+  ctx.fillStyle = 'rgba(125,227,255,0.6)';
+  ctx.beginPath(); ctx.arc(px - pr*0.15, py - pr*0.15, pr*0.55, 0, Math.PI*2); ctx.fill();
+
+  // White outline
+  ctx.strokeStyle = 'rgba(125,227,255,0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI*2); ctx.stroke();
+
+  // Aim indicator triangle on top
+  const aimRad = aimAngle * Math.PI / 180;
+  const indDist = pr * 1.3;
+  const indX = px + Math.cos(aimRad) * indDist;
+  const indY = py - Math.sin(aimRad) * indDist;
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.beginPath();
+  const triR = pr * 0.25;
+  ctx.moveTo(indX + Math.cos(aimRad)*triR, indY - Math.sin(aimRad)*triR);
+  ctx.lineTo(indX + Math.cos(aimRad+2.3)*triR, indY - Math.sin(aimRad+2.3)*triR);
+  ctx.lineTo(indX + Math.cos(aimRad-2.3)*triR, indY - Math.sin(aimRad-2.3)*triR);
+  ctx.closePath(); ctx.fill();
+}
+
+// ── Draw Aim Line ──
+function drawAimLine() {
+  const rad = aimAngle * Math.PI / 180;
+  const dx = Math.cos(rad), dy = Math.sin(rad);
+  const startX = PLAYER_X, startY = PLAYER_Y + 0.3;
+
+  for (let i = 0; i < AIM_SEGMENTS - 1; i++) {
+    const t0 = i / (AIM_SEGMENTS - 1);
+    const t1 = (i+1) / (AIM_SEGMENTS - 1);
+    const alpha = 0.5 * (1 - t0) + 0.05 * t0;
+    const x0 = toX(startX + dx * t0 * AIM_LENGTH);
+    const y0 = toY(startY + dy * t0 * AIM_LENGTH);
+    const x1 = toX(startX + dx * t1 * AIM_LENGTH);
+    const y1 = toY(startY + dy * t1 * AIM_LENGTH);
+    const w = 2.5 * (1-t0) + 0.8 * t0;
+    ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+    ctx.lineWidth = w;
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+  }
+}
+
+// ── Draw Bullets ──
+function drawBullets() {
+  for (const b of bullets) {
+    if (!b.alive) continue;
+    const col = b.frost ? '#aaddff' : '#ffee44';
+    drawCircle(b.x, b.y, b.r, col);
+  }
+}
+
+// ── Draw Snake ──
+function drawSnake(s) {
+  if (s.defeated) return;
+
+  // Draw from tail to head for proper layering
+  for (let i = s.segments.length - 1; i >= 0; i--) {
+    const seg = s.segments[i];
+    if (!seg.alive) continue;
+    const x = seg.vx, y = seg.vy;
+    if (x === undefined) continue;
+
+    if (seg.type === 'head') {
+      // Head: colored circle with white eye
+      const frozen = seg.slowTimer > 0;
+      const col = frozen ? [128,204,255] : s.col;
+      drawCircle(x, y, seg.r, rgb(col), 'rgba(255,255,255,0.7)', 1.5);
+      // Eye
+      drawCircle(x, y, seg.r * 0.45, 'rgba(255,255,255,0.8)');
+      drawCircle(x, y, seg.r * 0.2, 'rgba(0,0,0,0.6)');
+    }
+    else if (seg.type === 'reward') {
+      // Reward: yellow diamond with brown HP text
+      const frozen = seg.slowTimer > 0;
+      const col = frozen ? '#80ccff' : '#ffe633';
+      drawDiamond(x, y, seg.r, col);
+      // Outline
+      const cx = toX(x), cy = toY(y), cr = toS(seg.r);
+      ctx.strokeStyle = frozen ? '#aaddff' : '#ccb800';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy-cr); ctx.lineTo(cx+cr, cy);
+      ctx.lineTo(cx, cy+cr); ctx.lineTo(cx-cr, cy);
+      ctx.closePath(); ctx.stroke();
+
+      if (seg.hp > 0) {
+        drawHudText(seg.hp.toString(), toX(x), toY(y), 8, '#7a4a10', 'center');
+      }
+    }
+    else if (seg.type === 'sub') {
+      // Sub segment: colored circle
+      const g = seg.group;
+      if (!g) continue;
+      const frozen = seg.slowTimer > 0;
+      if (frozen) {
+        drawCircle(x, y, seg.r, '#80ccff');
+      } else {
+        const hpR = Math.max(0, g.hp) / g.maxHp;
+        const darkCol = [77,77,77];
+        const col = lerpC(darkCol, s.col, hpR);
+        drawCircle(x, y, seg.r, rgb(col));
+      }
+    }
+  }
+
+  // HP text for groups (drawn on top)
+  for (const g of s.groups) {
+    if (g.destroyed) continue;
+    // Find middle alive sub in this group
+    let midSeg = null, count = 0;
+    for (const seg of s.segments) {
+      if (seg.group === g && seg.alive) {
+        count++;
+        if (count === Math.ceil(SUBS_PER / 2)) midSeg = seg;
+      }
+    }
+    if (!midSeg) {
+      // fallback: first alive
+      for (const seg of s.segments)
+        if (seg.group === g && seg.alive) { midSeg = seg; break; }
+    }
+    if (midSeg) {
+      const hpR = Math.max(0, g.hp) / g.maxHp;
+      const tcol = lerpC([255,68,68], [255,255,255], hpR);
+      drawHudText(g.hp.toString(), toX(midSeg.vx), toY(midSeg.vy), 8, rgb(tcol), 'center');
+    }
+  }
+}
+
+// ── Draw Particles ──
+function drawParticles() {
+  for (const p of particles) {
+    const a = Math.max(0, p.life / p.maxLife);
+    ctx.globalAlpha = a;
+    drawCircle(p.x, p.y, p.r * a, rgb(p.color));
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ── Draw HUD ──
+function drawHUD() {
+  // Top bar background
+  const barH = 30;
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(0, 0, CW, barH);
+
+  // HP (left, red)
+  drawHudText(`HP: ${playerHP}/${maxHP}`, CW * 0.15, barH / 2, 13, '#ff4444', 'center');
+
+  // Wave (center, white)
+  drawHudText(`Wave: ${wave}`, CW * 0.5, barH / 2, 13, '#ffffff', 'center');
+
+  // Score (right, gold)
+  drawHudText(`Score: ${score}`, CW * 0.85, barH / 2, 12, '#ffe64d', 'center');
+
+  // Skill indicators (bottom)
+  const skills = [];
+  if (hasFrost) skills.push('Frost');
+  if (hasSplit) skills.push('Split');
+  if (hasPierce) skills.push('Pierce');
+  if (skills.length > 0) {
+    drawHudText(skills.join(' | '), CW/2, CH - 12, 9, 'rgba(255,255,255,0.4)', 'center');
+  }
+}
+
+// ── Draw Menu ──
+function drawMenu() {
+  // Overlay
+  ctx.fillStyle = 'rgba(5,5,21,0.92)';
+  ctx.fillRect(CW*0.1, CH*0.25, CW*0.8, CH*0.5);
+
+  // Border
+  ctx.strokeStyle = 'rgba(77,201,246,0.3)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(CW*0.1, CH*0.25, CW*0.8, CH*0.5);
+
+  drawHudText('CELL SURVIVOR', CW/2, CH*0.35, 28, '#4cff80', 'center');
+  drawHudText('Destroy the virus snake!', CW/2, CH*0.43, 13, '#ffffff', 'center');
+  drawHudText('Drag to aim \u2022 Auto-fire', CW/2, CH*0.49, 11, '#ffee88', 'center');
+
+  // Start button
+  const btnX = CW*0.25, btnY = CH*0.58, btnW = CW*0.5, btnH = 36;
+  ctx.fillStyle = '#33b34d';
+  ctx.beginPath();
+  roundRect(btnX, btnY, btnW, btnH, 8);
+  ctx.fill();
+  drawHudText('TAP TO START', CW/2, btnY + btnH/2, 15, '#ffffff', 'center');
+}
+
+// ── Draw Game Over ──
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(5,5,21,0.95)';
+  ctx.fillRect(CW*0.1, CH*0.2, CW*0.8, CH*0.55);
+
+  ctx.strokeStyle = 'rgba(255,68,68,0.3)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(CW*0.1, CH*0.2, CW*0.8, CH*0.55);
+
+  drawHudText('GAME OVER', CW/2, CH*0.3, 30, '#ff4d4d', 'center');
+  drawHudText(`Wave: ${wave}`, CW/2, CH*0.4, 20, '#ffffff', 'center');
+  drawHudText(`Score: ${score}`, CW/2, CH*0.47, 16, '#ffe64d', 'center');
+
+  const btnX = CW*0.25, btnY = CH*0.57, btnW = CW*0.5, btnH = 36;
+  ctx.fillStyle = '#33b34d';
+  ctx.beginPath();
+  roundRect(btnX, btnY, btnW, btnH, 8);
+  ctx.fill();
+  drawHudText('RESTART', CW/2, btnY + btnH/2, 15, '#ffffff', 'center');
+}
+
+// ── Draw Countdown ──
+function drawCountdown() {
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(0, 0, CW, CH);
+  drawHudText(countdownText, CW/2, CH*0.4, 60, '#ffffff', 'center');
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y); ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r); ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h); ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r); ctx.quadraticCurveTo(x, y, x+r, y);
+}
+
+// ══════════════════════════════════════════════════
+// CLICK HANDLER (menu/gameover buttons)
+// ══════════════════════════════════════════════════
+canvas.addEventListener('click', e => {
+  const r = canvas.getBoundingClientRect();
+  const cx = (e.clientX - r.left) / displayScale;
+  const cy = (e.clientY - r.top) / displayScale;
+
+  if (gameState === 'menu') {
+    // Check start button area
+    const btnX = CW*0.25, btnY = CH*0.58, btnW = CW*0.5, btnH = 36;
+    if (cx >= btnX && cx <= btnX+btnW && cy >= btnY && cy <= btnY+btnH) {
+      startGame();
+    }
+  }
+  else if (gameState === 'gameover') {
+    const btnX = CW*0.25, btnY = CH*0.57, btnW = CW*0.5, btnH = 36;
+    if (cx >= btnX && cx <= btnX+btnW && cy >= btnY && cy <= btnY+btnH) {
+      startGame();
+    }
+  }
+});
+
+// ══════════════════════════════════════════════════
+// MAIN LOOP
+// ══════════════════════════════════════════════════
+let lastTime = 0;
+
+function gameLoop(time) {
+  requestAnimationFrame(gameLoop);
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  // ── DRAW ──
+  drawBackground();
+
+  if (gameState === 'menu') {
+    drawMenu();
+    return;
+  }
+
+  if (gameState === 'countdown') {
+    drawPlayer();
+    drawAimLine();
+
+    countdownTimer -= dt;
+    if (countdownTimer > 1.8) countdownText = '3';
+    else if (countdownTimer > 1.2) countdownText = '2';
+    else if (countdownTimer > 0.6) countdownText = '1';
+    else if (countdownTimer > 0) countdownText = 'GO!';
+    else {
+      gameState = 'playing';
+      snake = createSnake(wave);
+    }
+    drawCountdown();
+    drawHUD();
+    return;
+  }
+
+  if (gameState === 'playing') {
+    // ── UPDATE ──
+    // Player invincibility
+    if (playerInvTimer > 0) playerInvTimer -= dt;
+
+    // Aim input: calculate angle from player to input position
+    const worldInputX = (inputX / PPU) - HALF_W;
+    const worldInputY = HALF_H - (inputY / PPU);
+    const diffX = worldInputX - PLAYER_X;
+    const diffY = worldInputY - PLAYER_Y;
+    if (diffY > 0.1) {
+      let angle = Math.atan2(diffY, diffX) * 180 / Math.PI;
+      aimAngle = Math.max(MIN_ANGLE, Math.min(MAX_ANGLE, angle));
+    }
+
+    // Auto-fire
+    fireTimer += dt;
+    if (fireTimer >= FIRE_INTERVAL) {
+      fireTimer -= FIRE_INTERVAL;
+      fireBullet();
+    }
+
+    // Update bullets
+    for (const b of bullets) {
+      if (!b.alive) continue;
+      b.x += b.dx * b.speed * dt;
+      b.y += b.dy * b.speed * dt;
+      if (b.y > 7 || b.y < -7 || b.x < -5 || b.x > 5) b.alive = false;
+    }
+    bullets = bullets.filter(b => b.alive);
+
+    // Update snake
+    if (snake) updateSnake(snake, dt);
+
+    // Collisions
+    checkCollisions();
+
+    // Update particles
+    for (const p of particles) {
+      p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+    }
+    particles = particles.filter(p => p.life > 0);
+
+    // ── DRAW (in correct order) ──
+    drawParticles();
+    drawBullets();
+    if (snake) drawSnake(snake);
+    drawAimLine();
+    drawPlayer();
+    drawHUD();
+  }
+
+  if (gameState === 'gameover') {
+    // Still draw game elements
+    drawParticles();
+    drawBullets();
+    if (snake) drawSnake(snake);
+    drawPlayer();
+    drawHUD();
+    drawGameOver();
+  }
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
