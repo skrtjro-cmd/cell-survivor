@@ -623,42 +623,21 @@ function drawBullets() {
 function drawSnake(s) {
   if (s.defeated) return;
 
-  // Draw from tail to head for proper layering
+  // Pass 1: Draw head and sub segments (tail to head)
   for (let i = s.segments.length - 1; i >= 0; i--) {
     const seg = s.segments[i];
-    if (!seg.alive) continue;
+    if (!seg.alive || seg.type === 'reward') continue;
     const x = seg.vx, y = seg.vy;
     if (x === undefined) continue;
 
     if (seg.type === 'head') {
-      // Head: colored circle with white eye
       const frozen = seg.slowTimer > 0;
       const col = frozen ? [128,204,255] : s.col;
       drawCircle(x, y, seg.r, rgb(col), 'rgba(255,255,255,0.7)', 1.5);
-      // Eye
       drawCircle(x, y, seg.r * 0.45, 'rgba(255,255,255,0.8)');
       drawCircle(x, y, seg.r * 0.2, 'rgba(0,0,0,0.6)');
     }
-    else if (seg.type === 'reward') {
-      // Reward: yellow diamond with brown HP text
-      const frozen = seg.slowTimer > 0;
-      const col = frozen ? '#80ccff' : '#ffe633';
-      drawDiamond(x, y, seg.r, col);
-      // Outline
-      const cx = toX(x), cy = toY(y), cr = toS(seg.r);
-      ctx.strokeStyle = frozen ? '#aaddff' : '#ccb800';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy-cr); ctx.lineTo(cx+cr, cy);
-      ctx.lineTo(cx, cy+cr); ctx.lineTo(cx-cr, cy);
-      ctx.closePath(); ctx.stroke();
-
-      if (seg.hp > 0) {
-        drawHudText(seg.hp.toString(), toX(x), toY(y), 26, '#7a4a10', 'center');
-      }
-    }
     else if (seg.type === 'sub') {
-      // Sub segment: colored circle
       const g = seg.group;
       if (!g) continue;
       const frozen = seg.slowTimer > 0;
@@ -670,6 +649,29 @@ function drawSnake(s) {
         const col = lerpC(darkCol, s.col, hpR);
         drawCircle(x, y, seg.r, rgb(col));
       }
+    }
+  }
+
+  // Pass 2: Draw reward segments on top of everything
+  for (let i = s.segments.length - 1; i >= 0; i--) {
+    const seg = s.segments[i];
+    if (!seg.alive || seg.type !== 'reward') continue;
+    const x = seg.vx, y = seg.vy;
+    if (x === undefined) continue;
+
+    const frozen = seg.slowTimer > 0;
+    const col = frozen ? '#80ccff' : '#ffe633';
+    drawDiamond(x, y, seg.r, col);
+    const cx = toX(x), cy = toY(y), cr = toS(seg.r);
+    ctx.strokeStyle = frozen ? '#aaddff' : '#ccb800';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy-cr); ctx.lineTo(cx+cr, cy);
+    ctx.lineTo(cx, cy+cr); ctx.lineTo(cx-cr, cy);
+    ctx.closePath(); ctx.stroke();
+
+    if (seg.hp > 0) {
+      drawHudText(seg.hp.toString(), toX(x), toY(y), 26, '#7a4a10', 'center');
     }
   }
 
